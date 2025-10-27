@@ -1,0 +1,262 @@
+AXR2KPxr2000.leo.spacenet:send a single 0 byte followed by 'XR2K' for documentation.?XR2K?#SPACE TERMINAL INTERFACE PROTOCOL
+=================================
+The XR-2000 space terminal is a communications satellite that is used to communicate with spacecraft.
+
+This protocol allows a user to remotely use the XR-2000 space terminal to send messages to and receive messages from spacecraft using the global space communication network.
+
+
+PACKET STRUCTURE
+----------------
+Packets are sent over a TCP connection that is established by the client to the terminal on port 29438.
+
+packet header:
+* 2 bits length field length (LFL).
+  - 0: packet has no payload.
+  - 1: 1 byte length field
+  - 2: 2 byte length field
+  - 3: 4 byte length field
+* 1 bit: request id field present
+* 5 bits packet type.
+* 1 byte request id (if present)
+* 4 bytes magic
+* 0, 1, 2 or 4 bytes payload length
+* 0..n bytes payload
+
+all integers are little endian and unsigned unless indicated otherwise.
+
+The request id field can be used by the client to correlate requests with their responses. The value may be chosen by the client. If the field is present in a request packet, it will be copied into the response by the terminal.
+
+The magic bytes contain the ascii text: XR2K
+
+PACKET TYPES
+------------
+The following packet types are defined:
+
+* 0x00 help           client -> terminal
+* 0x01 hello          terminal -> client
+* 0x02 documentation  terminal -> client
+* 0x03 register       client -> terminal
+* 0x04 registered     terminal -> client
+* 0x05 login          client -> terminal
+* 0x07 getstatus      client -> terminal
+* 0x08 status         terminal -> client
+* 0x09 getmail        client -> terminal
+* 0x0a mail           terminal -> client
+* 0x0b sendmail       client -> terminal
+* 0x12 configure      client -> terminal
+* 0x14 route          both
+* 0x15 translate      client -> terminal
+* 0x16 translation    terminal -> client
+* 0x1f result         terminal -> client
+
+
+0x00 HELP PACKET
+-------------------------
+This packet is used by the client to request the protocol documentation. The terminal will respond with a DOCUMENTATION (0x02) packet.
+
+This packet has no contents, which means the Length-Field-Length is 0. The request id field can also be disabled. So the client only needs to send a single 0-byte to obtain the documentation.
+
+
+0x01 HELLO PACKET
+-----------------
+This packet is sent by the terminal immediately after a new TCP connection has been established.
+
+Packet payload:
+* 1 byte: protocol version. The only defined version is 1
+* 1 byte: terminal hostname length
+* 0..255 bytes: terminal hostname
+* 1 byte: documentation instruction length
+* 0..255 bytes: documentation instructions
+
+
+0x02 DOCUMENTATION PACKET
+-------------------------
+This packet is sent by the terminal to provide the this document, the protocol spec, to the client.
+
+The contents of this packet is the protocol spec.
+
+
+0x03 REGISTER PACKET
+--------------------
+This packet is sent by the client to create a new user account. This packet is only valid if the user is not yet authenticated.
+
+This packet has no payload.
+
+If registration succeeds, the terminal will respond with an REGISTERED (0x04) packet, which contains the username and password of the created user. The client should then save these values so that it can LOGIN later.
+
+If registration fails, the terminal will respond with an RESULT (0x1f) packet.
+
+Possible errors:
+* 0x11 registration rate limiting: too many accounts were registered from this IP.
+* 0x1 already authenticated
+
+
+0x04 REGISTERED
+---------------
+This packet is sent by the terminal to the client to provide the credentials to the newly created account.
+
+Packet contents:
+* 1 byte: username length
+* 0..255 bytes: username
+* 1 byte: password length
+* 0..255: password
+
+
+0x05 LOGIN PACKET
+-----------------
+This packet is sent by the client to authenticate using credentials that have been previously obtained from the REGISTERED message. This packet is only valid if the user is not yet authenticated.
+
+Packet contents:
+* 1 byte: username length
+* 0..255 bytes: username
+* 1 byte: password length
+* 0..255: password
+
+If authentication succeeds, the terminal will respond with a RESULT (0x1f) packet with error type 0. Additionally, a STATUS (0x08) packet will be sent to reflect the authenticated status.
+
+If authentication fails, the terminal will send a RESULT (0x1f) message with the appropriate error type.
+
+Possible errors:
+* 0x1 already authenticated
+* 0x3 invalid credentials
+
+
+0x07 GETSTATUS PACKET
+---------------------
+This packet is used by the client to request a STATUS (0x08) packet.
+
+This packet has no payload.
+
+This request will always succeed, no errors are defined.
+
+
+0x08 STATUS PACKET
+------------------
+This packet is sent by the terminal either as a response to a GETSTATUS (0x08) packet or because of a specific event such as logging in or a new mail message arriving.
+
+If the user is not authenticated, the number of emails field will be -1 (0xffffffff)
+
+Packet contents:
+* 4 bytes: number of mails
+* 4 bytes: connection time (in seconds)
+* 1 bit: authenticated
+* 1 bit: authorized for transceiver usage
+* 1 bit: transceiver configured
+* 5 bits: undefined
+
+
+0x09 GETMAIL PACKET
+-------------------
+This packet is used by the client to request the contents of a mail. The XR-2000 mail system is very simple. Each user has a mailbox. Incoming emails receive an id starting with 1. Mails can not be editted or deleted. Sent emails are not stored in the sender's mailbox. The mail system is only internal and not connected to the internet email system.
+
+This request is only valid when the user is authenticated.
+
+If the referenced mail is found, the terminal will respond with a MAIL (0x0a) packet. If not, the terminal will send a RESULT (0x1f) packet indicating the appropriate error type.
+
+Packet contents:
+* 4 bytes: mail id
+
+Possible errors:
+* 0x02 not authenticated
+* 0x40 mail not found
+
+
+0x0a MAIL PACKET
+----------------
+This packet is the response to a GETMAIL (0x09) packet and contains an email metadata and full contents.
+
+Packet contents
+* 4 bytes: mail id
+* 4 bytes: timestamp (unix)
+* 1 byte: sender length
+* 0..255 bytes: sender username
+* 4 bytes: content length
+* 0..n bytes: contents
+
+
+0x0b SENDMAIL PACKET
+--------------------
+This packet is used by the client to send a mail to another user.
+
+If the mail is sent successfully, the termimal will respond with a RESULT (0x1f) packet with error type 0. If an error occurred, the error type will be set to the appropriate value.
+
+Packet contents
+* 1 byte: recipient length
+* 0..255 bytes: recipient username
+* 4 bytes: content length
+* 0..n bytes: contents
+
+Possible errors:
+* 0x02 not authenticated
+* 0x41 recipient username not found
+
+
+0x12 CONFIGURE PACKET
+---------------------
+This packet is used by the client to configure the XR2000 transceiver. This packet is only valid of the user is authenticated.
+
+Packet contents:
+* 4 bytes: frequency (in kHz)
+* 4 bytes: baudrate (in bps)
+* 1 byte: modulation (see below)
+
+Modulation types:
+* 0x00 Amplitude Modulation (AM)
+* 0x01 Frequency Modulation (FM)
+* 0x02 Phase Modulation (PM)
+* 0x03 Binary Phase Shift Keying (BPSK)
+
+If configuration succeeds, the terminal will respond with a RESULT (0x1f) packet with error type 0.
+
+If configuration fails, the terminal will send a RESULT (0x1f) message with the appropriate error type.
+
+Possible errors:
+* 0x02 not authenticated
+* 0x04 not authorized for transceiver usage
+* 0x20 transceiver malfunction
+* 0x21 invalid config parameter
+
+
+0x14 ROUTE PACKET
+-----------------
+This packet is used by both sides to transport data to and from the spacecraft. It is only valid when the user is authenticated and the transceiver is configured.
+
+If the terminal can send the packet out to the transceiver, Route packets have no response, there is no guarantee that the data is received by the spacecraft.
+
+The packet contents are the bytes that are sent to or from the spacecraft without any additional headers.
+
+Possible errors:
+* 0x02 not authenticated
+* 0x04 not authorized for transceiver usage
+* 0x24 transceiver not configured
+* 0x25 transceiver malfunction
+
+
+0x15 TRANSLATE PACKET
+---------------------
+This packet is used by the client to use the Rasvakian dictionary built into the XR-2000.
+
+If translation of the requested word is available, the terminal will respond with a TRANSLATION (0x16) packet. Otherwise, an RESULT (0x1f) packet will be sent.
+
+The contents of the packet is the word that needs to be translated.
+
+Possible errors:
+* 0x12 translation limiting: send max 1 translate request per second.
+* 0x50 translation not found
+
+
+0x16 TRANSLATION PACKET
+-----------------------
+This packet is sent by the terminal to provide a response to a TRANSLATE (0x20) packet.
+
+The contents of the packet is the Atlantian translation of the requested word.
+
+
+0x1f RESULT PACKET
+-----------------
+This packet is sent from the terminal to the client to indicate an error processing the last packet sent to the terminal.
+
+Some request types also have a RESULT packet as a response to indicate success. In this case the error type field value will be 0
+
+Packet contents:
+* 1 byte: error type: 0 for no error
