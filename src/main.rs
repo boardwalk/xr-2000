@@ -269,9 +269,15 @@ fn read_string(mut stream: impl Read) -> Result<String, Error> {
     let len = usize::from(stream.read_u8()?);
     let mut buf = vec![0; len];
     stream.read_exact(&mut buf)?;
-
     let s = String::from_utf8(buf)?;
     Ok(s)
+}
+
+fn write_string(mut stream: impl Write, value: &str) -> Result<(), Error> {
+    let len = u8::try_from(value.len())?;
+    stream.write_u8(len)?;
+    stream.write_all(value.as_bytes())?;
+    Ok(())
 }
 
 fn main() -> Result<(), Error> {
@@ -317,9 +323,19 @@ fn main() -> Result<(), Error> {
         login_info
     };
 
-    println!("{login_info:?}");
+    let mut cursor = Cursor::new(Vec::new());
 
-    // todo authenticate
+    write_string(&mut cursor, &login_info.username)?;
+    write_string(&mut cursor, &login_info.password)?;
+
+    let mut login_req = Packet {
+        packet_type: PacketType::Login,
+        request_id: None,
+        payload: cursor.into_inner(),
+    };
+
+    let _login_resp = do_request(&mut login_req, &mut stream)?;
+    assert_eq!(_login_resp.packet_type, PacketType::Result);
 
     Ok(())
 }
