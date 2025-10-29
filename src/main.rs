@@ -1,12 +1,15 @@
-use anyhow::Error;
-use anyhow::anyhow;
-use anyhow::bail;
+#![feature(hash_set_entry)]
+use anyhow::{Error, anyhow, bail};
+use bitfields::bitfield;
 use byteorder::{LittleEndian, ReadBytesExt as _, WriteBytesExt as _};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::net::ToSocketAddrs as _;
+use std::thread::sleep;
+use std::time::Duration;
 
 const ADDR: &str = "clearsky.dev:29438";
 const MAGIC: u32 = 0x4b325258;
@@ -30,6 +33,49 @@ enum PacketType {
     Translate,
     Translation,
     Result,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RequestResult {
+    Success,
+    AlreadyAuthenticated,
+    NotAuthenticated,
+    InvalidCredentials,
+    NotAuthorizedForTransceiverUsage,
+    TranslationLimiting,
+    ConfigureMalfunction,
+    InvalidConfigParameter,
+    TransceiverNotConfigured,
+    RouteMalfunction,
+    MailNotFound,
+    RecipientUsernameNotFound,
+    TranslationNotFound,
+}
+impl TryFrom<u8> for RequestResult {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        use RequestResult::*;
+
+        let val = match value {
+            0x00 => Success,
+            0x01 => AlreadyAuthenticated,
+            0x02 => NotAuthenticated,
+            0x03 => InvalidCredentials,
+            0x05 => NotAuthorizedForTransceiverUsage,
+            0x23 => TranslationLimiting,
+            0x20 => ConfigureMalfunction,
+            0x21 => InvalidConfigParameter,
+            0x24 => TransceiverNotConfigured,
+            0x25 => RouteMalfunction,
+            0x40 => MailNotFound,
+            0x41 => RecipientUsernameNotFound,
+            0x50 => TranslationNotFound,
+            _ => bail!("invalid request result"),
+        };
+
+        Ok(val)
+    }
 }
 
 impl TryFrom<u8> for PacketType {
@@ -117,6 +163,28 @@ impl Packet {
     }
 }
 
+#[bitfield(u8, order = msb)]
+struct PacketHeader {
+    #[bits(2)]
+    lfl: u8,
+    has_request_id: bool,
+    #[bits(5)]
+    packet_type: u8,
+}
+
+#[bitfield(u8)]
+struct StatusFlags {
+    #[bits(1)]
+    authenticated: bool,
+    #[bits(1)]
+    transceiver_authorized: bool,
+
+    #[bits(1)]
+    transceiver_configured: bool,
+    #[bits(5)]
+    _pad: u8,
+}
+
 #[derive(Debug)]
 struct RawHeader {
     lfl: u8,
@@ -161,9 +229,9 @@ impl From<RawHeader> for u8 {
 }
 
 fn read_packet(mut stream: impl Read) -> Result<Packet, Error> {
-    let header = RawHeader::from(stream.read_u8()?);
+    let header = PacketHeader::from_bits(stream.read_u8()?);
 
-    let request_id = if header.request_id_present != 0 {
+    let request_id = if header.has_request_id() {
         Some(stream.read_u8()?)
     } else {
         None
@@ -174,9 +242,9 @@ fn read_packet(mut stream: impl Read) -> Result<Packet, Error> {
         bail!("invalid magic")
     }
 
-    let packet_type = PacketType::try_from(header.packet_type)?;
+    let packet_type = PacketType::try_from(header.packet_type())?;
 
-    let payload_len = match header.lfl {
+    let payload_len = match header.lfl() {
         0 => 0,
         1 => stream.read_u8()? as usize,
         2 => stream.read_u16::<LittleEndian>()? as usize,
@@ -211,13 +279,13 @@ fn write_packet(mut stream: impl Write, pkt: &Packet) -> Result<(), Error> {
         }
     };
 
-    let header = RawHeader {
-        lfl,
-        request_id_present: if pkt.request_id.is_some() { 1 } else { 0 },
-        packet_type: u8::from(pkt.packet_type),
-    };
+    let header = PacketHeaderBuilder::new()
+        .with_has_request_id(pkt.request_id.is_some())
+        .with_lfl(lfl)
+        .with_packet_type(u8::from(pkt.packet_type))
+        .build();
 
-    stream.write_all(&[u8::from(header)])?;
+    stream.write_all(&[header.into_bits()])?;
 
     if let Some(request_id) = pkt.request_id {
         stream.write_all(&[request_id])?;
@@ -246,19 +314,6 @@ fn write_packet(mut stream: impl Write, pkt: &Packet) -> Result<(), Error> {
     Ok(())
 }
 
-fn do_request(req: &mut Packet, mut stream: impl Read + Write) -> Result<Packet, Error> {
-    req.request_id = Some(rand::random::<u8>());
-
-    write_packet(&mut stream, req)?;
-    let resp = read_packet(&mut stream)?;
-
-    if resp.request_id != req.request_id {
-        bail!("mismatched request_id");
-    }
-
-    Ok(resp)
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 struct LoginInfo {
     username: String,
@@ -280,62 +335,325 @@ fn write_string(mut stream: impl Write, value: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn main() -> Result<(), Error> {
-    let addr = ADDR
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow!("addr didn't resolve to any addresses"))?;
+#[derive(Debug)]
+struct Mail {
+    mail_id: u32,
+    timestamp: u32,
+    sender: String,
+    content: String,
+}
 
-    let mut stream = TcpStream::connect(addr)?;
+enum Modulation {
+    AM,
+    FM,
+    PM,
+    BPSK,
+}
 
-    let hello_pkt = read_packet(&mut stream)?;
-    assert_eq!(hello_pkt.packet_type, PacketType::Hello);
+impl From<Modulation> for u8 {
+    fn from(value: Modulation) -> Self {
+        match value {
+            Modulation::AM => 0x00,
+            Modulation::FM => 0x01,
+            Modulation::PM => 0x02,
+            Modulation::BPSK => 0x03,
+        }
+    }
+}
 
-    let login_info = if std::fs::exists(LOGIN_INFO_PATH)? {
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .open(LOGIN_INFO_PATH)?;
+struct Configuration {
+    frequency: u32,
+    baud_rate: u32,
+    modulation: Modulation,
+}
 
-        serde_json::from_reader::<_, LoginInfo>(f)?
-    } else {
-        let mut register_req = Packet {
-            packet_type: PacketType::Register,
-            request_id: None,
-            payload: Vec::new(),
+struct Client {
+    stream: TcpStream,
+    login_info: Option<LoginInfo>,
+    num_mails: u32,
+    mail: HashMap<u32, Mail>,
+}
+
+impl Client {
+    fn new() -> Result<Self, Error> {
+        let addr = ADDR
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| anyhow!("addr didn't resolve to any addresses"))?;
+
+        let mut stream = TcpStream::connect(addr)?;
+
+        let hello_pkt = read_packet(&mut stream)?;
+        assert_eq!(hello_pkt.packet_type, PacketType::Hello);
+
+        Ok(Self {
+            stream,
+            login_info: None,
+            num_mails: 0,
+            mail: HashMap::new(),
+        })
+    }
+
+    fn load_login_info(&mut self) -> Result<bool, Error> {
+        if std::fs::exists(LOGIN_INFO_PATH)? {
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .open(LOGIN_INFO_PATH)?;
+
+            self.login_info = Some(serde_json::from_reader::<_, LoginInfo>(f)?);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn save_login_info(&mut self) -> Result<(), Error> {
+        let Some(login_info) = &self.login_info else {
+            bail!("no login info to save");
         };
-
-        let register_resp = do_request(&mut register_req, &mut stream)?;
-        assert_eq!(register_resp.packet_type, PacketType::Registered);
-        let mut cursor = Cursor::new(register_resp.payload.as_slice());
-
-        let username = read_string(&mut cursor)?;
-        let password = read_string(&mut cursor)?;
-
-        let login_info = LoginInfo { username, password };
 
         let f = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .open(LOGIN_INFO_PATH)?;
 
-        serde_json::to_writer_pretty::<_, LoginInfo>(f, &login_info)?;
+        serde_json::to_writer_pretty::<_, LoginInfo>(f, login_info)?;
+        Ok(())
+    }
 
-        login_info
-    };
+    fn do_request(&mut self, req: &mut Packet) -> Result<Packet, Error> {
+        req.request_id = Some(rand::random::<u8>());
 
-    let mut cursor = Cursor::new(Vec::new());
+        write_packet(&mut self.stream, req)?;
 
-    write_string(&mut cursor, &login_info.username)?;
-    write_string(&mut cursor, &login_info.password)?;
+        loop {
+            let resp = read_packet(&mut self.stream)?;
 
-    let mut login_req = Packet {
-        packet_type: PacketType::Login,
-        request_id: None,
-        payload: cursor.into_inner(),
-    };
+            if resp.packet_type == PacketType::Status {
+                let mut cursor = Cursor::new(&resp.payload);
 
-    let _login_resp = do_request(&mut login_req, &mut stream)?;
-    assert_eq!(_login_resp.packet_type, PacketType::Result);
+                let num_mails = cursor.read_u32::<LittleEndian>()?;
+                let conn_time = cursor.read_u32::<LittleEndian>()?;
+
+                let status_flags = StatusFlags::from_bits(cursor.read_u8()?);
+
+                println!(
+                    "got status with num_mails = {num_mails}, conn_time = {conn_time}, status_flags = {status_flags:?}"
+                );
+
+                self.num_mails = num_mails;
+
+                continue;
+            }
+
+            if resp.packet_type == PacketType::Result {
+                let mut cursor = Cursor::new(&resp.payload);
+
+                let rr = RequestResult::try_from(cursor.read_u8()?)?;
+
+                if !matches!(rr, RequestResult::Success) {
+                    bail!("request failed: {rr:?}");
+                }
+            }
+
+            if resp.request_id != req.request_id {
+                bail!("mismatched request_id");
+            }
+
+            return Ok(resp);
+        }
+    }
+
+    fn login(&mut self) -> Result<(), Error> {
+        let mut cursor = Cursor::new(Vec::new());
+
+        let Some(login_info) = self.login_info.as_ref() else {
+            bail!("no login info to use");
+        };
+
+        write_string(&mut cursor, &login_info.username)?;
+        write_string(&mut cursor, &login_info.password)?;
+
+        let mut login_req = Packet {
+            packet_type: PacketType::Login,
+            request_id: None,
+            payload: cursor.into_inner(),
+        };
+
+        let _login_resp = self.do_request(&mut login_req)?;
+        assert_eq!(_login_resp.packet_type, PacketType::Result);
+
+        Ok(())
+    }
+
+    fn register(&mut self) -> Result<(), Error> {
+        let mut register_req = Packet {
+            packet_type: PacketType::Register,
+            request_id: None,
+            payload: Vec::new(),
+        };
+
+        let register_resp = self.do_request(&mut register_req)?;
+        assert_eq!(register_resp.packet_type, PacketType::Registered);
+        let mut cursor = Cursor::new(register_resp.payload.as_slice());
+
+        let username = read_string(&mut cursor)?;
+        let password = read_string(&mut cursor)?;
+
+        self.login_info = Some(LoginInfo { username, password });
+
+        Ok(())
+    }
+
+    fn fetch_mail(&mut self, req_mail_id: u32) -> Result<(), Error> {
+        if self.mail.contains_key(&req_mail_id) {
+            return Ok(());
+        }
+
+        let mut cursor = Cursor::new(Vec::new());
+
+        cursor.write_u32::<LittleEndian>(req_mail_id)?;
+        let mut get_mail_req = Packet {
+            packet_type: PacketType::GetMail,
+            request_id: None,
+            payload: cursor.into_inner(),
+        };
+
+        let get_mail_resp = self.do_request(&mut get_mail_req)?;
+        assert_eq!(get_mail_resp.packet_type, PacketType::Mail);
+
+        let mut cursor = Cursor::new(get_mail_resp.payload);
+
+        let resp_mail_id = cursor.read_u32::<LittleEndian>()?;
+        assert_eq!(resp_mail_id, req_mail_id);
+
+        let timestamp = cursor.read_u32::<LittleEndian>()?;
+        let sender = read_string(&mut cursor)?;
+
+        let content_len = cursor.read_u32::<LittleEndian>()?;
+
+        let mut content = vec![0; content_len as usize];
+
+        cursor.read_exact(&mut content)?;
+        let content = String::from_utf8(content)?;
+
+        std::fs::write(format!("mail_{resp_mail_id}.txt"), &content)?;
+
+        self.mail.insert(
+            resp_mail_id,
+            Mail {
+                mail_id: resp_mail_id,
+                timestamp,
+                sender,
+                content,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn get_mail(&mut self, mail_id: u32) -> Result<&Mail, Error> {
+        let Some(mail) = self.mail.get(&mail_id) else {
+            bail!("No such mail");
+        };
+
+        Ok(mail)
+    }
+
+    fn get_new_mail(&mut self) -> Result<(), Error> {
+        for i in 0..self.num_mails {
+            self.fetch_mail(i + 1)?;
+        }
+
+        Ok(())
+    }
+
+    fn configure(&mut self, configuration: Configuration) -> Result<(), Error> {
+        let mut cursor = Cursor::new(Vec::new());
+
+        cursor.write_u32::<LittleEndian>(configuration.frequency)?;
+        cursor.write_u32::<LittleEndian>(configuration.baud_rate)?;
+
+        cursor.write_u8(configuration.modulation.into())?;
+
+        let mut configure_req = Packet {
+            packet_type: PacketType::Configure,
+            request_id: None,
+            payload: cursor.into_inner(),
+        };
+
+        let configure_resp = self.do_request(&mut &mut configure_req)?;
+
+        assert_eq!(configure_resp.packet_type, PacketType::Result);
+
+        Ok(())
+    }
+
+    // translate rasvakian to atlantian
+    fn translate(&mut self, rasvakian: &str) -> Result<String, Error> {
+        let mut translate_res = Packet {
+            packet_type: PacketType::Translate,
+            request_id: None,
+            payload: rasvakian.to_ascii_lowercase().into_bytes(),
+        };
+
+        let translate_resp = self.do_request(&mut translate_res)?;
+
+        assert_eq!(translate_resp.packet_type, PacketType::Translation);
+
+        let atlantian = String::from_utf8(translate_resp.payload)?.to_ascii_lowercase();
+
+        Ok(atlantian)
+    }
+}
+
+fn main() -> Result<(), Error> {
+    let mut client = Client::new()?;
+    if !client.load_login_info()? {
+        client.register()?;
+        client.save_login_info()?;
+    }
+
+    client.login()?;
+    client.fetch_mail(1)?;
+    client.fetch_mail(2)?;
+    let ciphertext = client.get_mail(2)?.content.to_ascii_lowercase();
+
+    println!("ciphertext = {ciphertext}");
+
+    let word_match = regex::Regex::new("[a-z]+")?;
+
+    let mut words = HashSet::new();
+
+    for m in word_match.find_iter(&ciphertext) {
+        words.get_or_insert_with(m.as_str(), |s| s.to_owned());
+    }
+
+    let mut translations = HashMap::new();
+
+    for (word_i, rasvakian) in words.iter().enumerate() {
+        println!("working on {} of {}", word_i, words.len());
+
+        let atlantian = client.translate(rasvakian)?;
+
+        client.get_new_mail()?;
+
+        translations.insert(rasvakian.to_string(), atlantian);
+
+        sleep(Duration::from_millis(1100));
+    }
+
+    let plaintext = word_match
+        .replace_all(&ciphertext, |captures: &regex::Captures| {
+            if let Some(translation) = translations.get(&captures[0]) {
+                translation.to_owned()
+            } else {
+                captures[0].to_owned()
+            }
+        })
+        .into_owned();
+
+    println!("{plaintext}");
 
     Ok(())
 }

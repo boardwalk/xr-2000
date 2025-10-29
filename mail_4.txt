@@ -1,0 +1,29 @@
+TOP SECRET - CODEWORD SILENT EAGLE
+==================================
+
+
+
+
+FROM    : Ministry of Defence, Atlantia
+TO      : User user-b98353c1
+SUBJECT : Project Silent Eagle
+
+
+
+
+
+Hi this is private Johnson from the 1337nd Space Wing Cryptographic Research division.
+
+While looking at your translations of the rasvakian document, we brainstormed about possibilities to access the spaceship systems without having the access code.
+
+The 8 bytes in the spacecraft response seem to each correspond to the 8 bytes of the access code, indicating if that byte of the sent access code is correct. So if we provide access code 00000000, then 11111111 and so on, in 256 requests we should be able to derive the correct access code.
+
+We hope this idea will help you complete the mission.
+
+Signed,
+
+Private X. Johnson
+1337nd Space Wing
+Atlantia Defence Force
+
+-=- Make Atlantia Fantastic Again -=-

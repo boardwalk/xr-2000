@@ -1,0 +1,43 @@
+TOP SECRET - CODEWORD SILENT EAGLE
+==================================
+
+
+
+
+FROM    : Ministry of Defence, Atlantia
+TO      : User user-b98353c1
+SUBJECT : Project Silent Eagle
+
+
+
+
+
+By registering a user account on this system, you have effectively enlisted to the atlantian Space Defence Force. That, or you have committed a crime against the high order of Atlantia punishable by life in prison. No worries though! We won't be sending you to the frontlines in Ugarina with a firearm in your hands... yet! We happen to have a very specific task for you, and we think you'll like it!
+
+Some months ago, a covert ops team broke into an old Rasvakian Space Organisation building and found some old documents describing a secretive spaceship launched during the early 1980s. The purpose and location of this spacecraft has been a mystery for decades. At the beginning we intercepted ground control communications, but it's encrypted and we had no idea how it was encrypted. A few years later, the Rasvakians seemed to have lost interest in the craft, no more transmissions have been observed. Either the spacecraft malfunctioned or some bureaucratic move made them scrap the program.
+
+The obtained documents were short and incomplete but they include details on the encryption used. My nerd-minions have spent the last few months complaining about "raw sockets" and "binary protocols" and how nobody uses these things anymore. They also say the spacecraft communication is protected by "military grade encryption" that is "uncrackable". 
+
+And that is where you come in.
+
+Your mission is to use the XR-2000 to gain access to the spacecraft systems. We will monitor your progress through the system.
+
+I will send the document as a separate mail. You will need to use the translation capabilities of the XR-2000 to translate it.
+
+Use the following settings to tune the transceiver to the spacecraft:
+
+Frequency:   2,381,230,000 Hz
+Baudrate:    9600
+Modulation:  BPSK
+
+Good luck.
+
+Signed,
+
+Colonel R.D. Archi
+1337nd Space Wing
+Atlantia Defence Force
+
+-=- Make Atlantia Fantastic Again -=-
+
+

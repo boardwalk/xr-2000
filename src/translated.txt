@@ -1,0 +1,20 @@
+this the office of the president of the national space program
+
+
+internal memo
+#############
+
+
+igor, my friend. before i turn over the office a you, i must life sure you know the way a contact the craft of project 7201.
+
+all communication with the craft is encrypted using a new super-strong military grade encryption called des in cbc mode. the first 8 bytes of each message is the initialization vector (iv) and is randomly generated. the encryption key is newly generated each day. if you do not know the current key, you can not communicate with the craft.
+
+there is a way a obtain the current daily key this the craft. a i showed you, in the safe there is a book of access codes. for each day, there are 8 numbers with value 0-255. you will send a the craft a message. the iv will be 8 bytes of 85. this is hw the craft will know it needs a use the handshake key. then you encrypt the code of the day with the handshake key, which i will list below.
+
+the craft will then send a message back. it will also be encrypted with the handshake key. the contents will be 8 bytes of value 0 indicating that you sent the correct access code, followed by 8 bytes which are the daily encryption key. you can then use that key for further communications for the rest of the day.
+
+please guard this information with your life. i truly believe project 7201 will change life on our little planet forever.
+
+your friend
+
+handshake key: rasvatka
